@@ -35,12 +35,12 @@ const (
 	xudpBaseKey                  = "xray.xudp.basekey"
 	tunFdKey                     = "xray.tun.fd"
 	browserDialerAddress         = "xray.browser.dialer"
-	libVersion                   = 43 // Library version, update here only
+	libVersion                   = 40 // Library version, update here only
 	defaultRealDelayTimeout      = 5 * time.Second
 	probeResultAggregationWindow = 50 * time.Millisecond
 )
 
-// ProbeHandler receives one compact update for the affected profile group.
+// ProbeHandler receives a group update whenever one of its targets finishes.
 // Calls are serialized even though the underlying checks run concurrently.
 type ProbeHandler interface {
 	OnProbeResult(groupID string, delay int64, completed bool)
@@ -213,7 +213,7 @@ func (c *ProbeController) Probe(
 	}
 	config.Inbound = nil
 
-	inst, err := core.New(config)
+	inst, err := core.NewWithContext(ctx, config)
 	if err != nil {
 		return fmt.Errorf("probe instance creation failed: %w", err)
 	}

@@ -116,7 +116,7 @@ func measureInstDelayWithOptions(
 	}
 
 	tr := &http.Transport{
-		TLSHandshakeTimeout: timeout,
+		TLSHandshakeTimeout: 6 * time.Second,
 		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
