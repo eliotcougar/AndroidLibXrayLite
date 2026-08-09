@@ -69,6 +69,7 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("config load error: %w", err)
 	}
 
+	// Simplify config for testing
 	config.Inbound = nil
 	var essentialApp []*serial.TypedMessage
 	for _, app := range config.App {
@@ -89,11 +90,23 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelay(context.Background(), inst, url)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultRealDelayTimeout)
+	defer cancel()
+	return measureInstDelayWithOptions(ctx, inst, url, http.MethodHead, 1, defaultRealDelayTimeout)
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
 func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
+	return measureInstDelayWithOptions(ctx, inst, url, http.MethodGet, 2, 12*time.Second)
+}
+
+func measureInstDelayWithOptions(
+	ctx context.Context,
+	inst *core.Instance,
+	url, method string,
+	attempts int,
+	timeout time.Duration,
+) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance is nil")
 	}
@@ -103,7 +116,7 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 	}
 
 	tr := &http.Transport{
-		TLSHandshakeTimeout: 6 * time.Second,
+		TLSHandshakeTimeout: timeout,
 		DisableKeepAlives:   false,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dest, err := corenet.ParseDestination(fmt.Sprintf("%s:%s", network, addr))
@@ -116,27 +129,29 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 	client := &http.Client{
 		Transport: tr,
-		Timeout:   12 * time.Second,
+		Timeout:   timeout,
 	}
 
 	var minDuration int64 = -1
 	success := false
 	var lastErr error
 
+	// Close idle connections to ensure the temporary instance can be closed safely
 	defer tr.CloseIdleConnections()
 
-	const attempts = 2
 	for i := 0; i < attempts; i++ {
 		select {
 		case <-ctx.Done():
+			// Return immediately when context is canceled
 			if !success {
 				return -1, ctx.Err()
 			}
 			return minDuration, nil
 		default:
+			// Continue execution
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, method, url, nil)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to create HTTP request: %w", err)
 			continue
@@ -149,7 +164,10 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 			continue
 		}
 
-		_, err = io.Copy(io.Discard, resp.Body)
+		// Read GET bodies so a subsequent attempt may reuse the connection.
+		if method == http.MethodGet {
+			_, err = io.Copy(io.Discard, resp.Body)
+		}
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
