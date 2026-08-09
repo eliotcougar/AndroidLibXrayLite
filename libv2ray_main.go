@@ -43,7 +43,7 @@ const (
 // ProbeHandler receives one compact update for the affected profile group.
 // Calls are serialized even though the underlying checks run concurrently.
 type ProbeHandler interface {
-	OnProbeResult(groupID string, delay int64, alive, completed bool) int
+	OnProbeResult(groupID string, delay int64, completed bool)
 }
 
 type probeGroup struct {
@@ -52,10 +52,11 @@ type probeGroup struct {
 	BalancerTag  string   `json:"balancerTag"`
 }
 
-// ProbeController owns one cancellable probe batch.
+// ProbeController owns one cancellable probe sequence.
 type ProbeController struct {
-	access sync.Mutex
-	cancel context.CancelFunc
+	access    sync.Mutex
+	cancel    context.CancelFunc
+	cancelled bool
 }
 
 func NewProbeController() *ProbeController {
@@ -64,6 +65,7 @@ func NewProbeController() *ProbeController {
 
 func (c *ProbeController) Cancel() {
 	c.access.Lock()
+	c.cancelled = true
 	cancel := c.cancel
 	c.access.Unlock()
 	if cancel != nil {
@@ -182,13 +184,24 @@ func (c *ProbeController) Probe(
 	configContent, groupsJSON string,
 	maxConcurrency int32,
 	handler ProbeHandler,
-) error {
+) (err error) {
+	// Keep malformed core state on the ordinary error path so the app can isolate
+	// the responsible profile instead of losing every result in the batch.
+	defer func() {
+		if value := recover(); value != nil {
+			err = fmt.Errorf("probe panicked: %v", value)
+		}
+	}()
 	var groups []probeGroup
 	if err := json.Unmarshal([]byte(groupsJSON), &groups); err != nil {
 		return fmt.Errorf("probe groups are invalid: %w", err)
 	}
 
 	c.access.Lock()
+	if c.cancelled {
+		c.access.Unlock()
+		return context.Canceled
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 	c.access.Unlock()
@@ -206,7 +219,10 @@ func (c *ProbeController) Probe(
 	}
 	defer inst.Close()
 
-	burst := inst.GetFeature(coreextension.ObservatoryType()).(coreextension.BurstObservatory)
+	burst, ok := inst.GetFeature(coreextension.ObservatoryType()).(coreextension.BurstObservatory)
+	if !ok || burst == nil {
+		return errors.New("probe burst observatory is unavailable")
+	}
 	if err := inst.Start(); err != nil {
 		return fmt.Errorf("probe startup failed: %w", err)
 	}
@@ -305,20 +321,18 @@ func runProbeGroups(
 		}
 		batch, closed := collectProbeCompletions(first, completed, workerCount)
 		statuses := currentProbeStatuses(burst)
-		results := make(map[int]probeResult, len(batch))
+		results := make(map[int]int64, len(batch))
 		for _, target := range batch {
 			if _, found := results[target.groupIndex]; !found {
-				results[target.groupIndex] = currentProbeResult(inst, groups[target.groupIndex], statuses)
+				results[target.groupIndex] = currentProbeDelay(inst, groups[target.groupIndex], statuses)
 			}
 		}
 		for _, target := range batch {
 			remaining[target.groupIndex]--
 			group := groups[target.groupIndex]
-			result := results[target.groupIndex]
 			handler.OnProbeResult(
 				group.GUID,
-				result.delay,
-				result.alive,
+				results[target.groupIndex],
 				remaining[target.groupIndex] == 0,
 			)
 		}
@@ -351,11 +365,6 @@ func collectProbeCompletions(
 	return batch, false
 }
 
-type probeResult struct {
-	delay int64
-	alive bool
-}
-
 func currentProbeStatuses(observer coreextension.BurstObservatory) map[string]*coreobservatory.OutboundStatus {
 	message, err := observer.GetObservation(context.Background())
 	if err != nil {
@@ -372,28 +381,31 @@ func currentProbeStatuses(observer coreextension.BurstObservatory) map[string]*c
 	return statuses
 }
 
-func currentProbeResult(
+func currentProbeDelay(
 	inst *core.Instance,
 	group probeGroup,
 	statuses map[string]*coreobservatory.OutboundStatus,
-) probeResult {
+) int64 {
 	if len(group.OutboundTags) == 0 {
-		return probeResult{delay: -1}
+		return -1
 	}
 	target := group.OutboundTags[0]
 	if group.BalancerTag != "" {
-		principle := inst.GetFeature(corerouting.RouterType()).(corerouting.BalancerPrincipleTarget)
-		targets, _ := principle.GetPrincipleTarget(group.BalancerTag)
-		if len(targets) == 0 {
-			return probeResult{delay: -1}
+		principle, ok := inst.GetFeature(corerouting.RouterType()).(corerouting.BalancerPrincipleTarget)
+		if !ok || principle == nil {
+			return -1
+		}
+		targets, err := principle.GetPrincipleTarget(group.BalancerTag)
+		if err != nil || len(targets) == 0 || targets[0] == "" {
+			return -1
 		}
 		target = targets[0]
 	}
 	status := statuses[target]
 	if status != nil && status.GetAlive() {
-		return probeResult{delay: status.GetDelay(), alive: true}
+		return status.GetDelay()
 	}
-	return probeResult{delay: -1}
+	return -1
 }
 
 // CheckVersionX returns the library and Xray versions
