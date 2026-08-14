@@ -64,7 +64,19 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
 func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error) {
-	config, err := coreserial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
+	return measureOutboundDelay(context.Background(), ConfigureFileContent, url)
+}
+
+// MeasureDelay runs one individually configured fallback through this controller.
+func (c *ProbeController) MeasureDelay(configContent string, url string) (int64, error) {
+	return measureOutboundDelay(c.ctx, configContent, url)
+}
+
+func measureOutboundDelay(parentCtx context.Context, configContent string, url string) (int64, error) {
+	if err := parentCtx.Err(); err != nil {
+		return -1, err
+	}
+	config, err := coreserial.LoadJSONConfig(strings.NewReader(configContent))
 	if err != nil {
 		return -1, fmt.Errorf("config load error: %w", err)
 	}
@@ -81,7 +93,14 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 	}
 	config.App = essentialApp
 
-	inst, err := core.New(config)
+	if err := acquireProbeCore(parentCtx); err != nil {
+		return -1, err
+	}
+	defer releaseProbeCore()
+
+	ctx, cancel := context.WithTimeout(parentCtx, defaultRealDelayTimeout)
+	defer cancel()
+	inst, err := core.NewWithContext(ctx, config)
 	if err != nil {
 		return -1, fmt.Errorf("instance creation failed: %w", err)
 	}
@@ -90,8 +109,6 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), defaultRealDelayTimeout)
-	defer cancel()
 	return measureInstDelayWithOptions(ctx, inst, url, http.MethodHead, 1, defaultRealDelayTimeout)
 }
 
