@@ -178,6 +178,22 @@ func (x *CoreController) ResetNetworkState() error {
 	return x.resetNetworkState("", "")
 }
 
+// ResetNetworkStateWithConfig recreates the running Xray instance from a
+// freshly generated configuration without applying a policy-balancer override.
+// If the refreshed configuration cannot start, the controller atomically
+// retries the last running configuration.
+func (x *CoreController) ResetNetworkStateWithConfig(configContent string) error {
+	if strings.TrimSpace(configContent) == "" {
+		return errors.New("replacement core configuration is empty")
+	}
+	return x.resetNetworkStateWithConfigAndStarter(
+		configContent,
+		"",
+		"",
+		x.doStartLoop,
+	)
+}
+
 // ResetNetworkStateWithWarmRoute recreates the running Xray instance and pins a
 // previously viable outbound only until the new observatory has a viable target.
 // Once a fresh target exists, the override is cleared so the normal balancing
