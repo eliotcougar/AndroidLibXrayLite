@@ -8,7 +8,7 @@ require (
 	golang.org/x/mobile v0.0.0-20260709172247-6129f5bee9d5
 )
 
-replace github.com/xtls/xray-core => github.com/eliotcougar/Xray-core v0.0.0-20260815225033-1d7cd181bfd2
+replace github.com/xtls/xray-core => github.com/eliotcougar/Xray-core v0.0.0-20260820140542-c96631ac2d9a
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
