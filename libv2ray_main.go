@@ -27,6 +27,7 @@ import (
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 	_ "github.com/xtls/xray-core/main/distro/all"
 	browser_dialer "github.com/xtls/xray-core/transport/internet/browser_dialer"
+	coresplithttp "github.com/xtls/xray-core/transport/internet/splithttp"
 	mobasset "golang.org/x/mobile/asset"
 )
 
@@ -725,6 +726,19 @@ func reportWarmRouteReadinessDeadline(
 			handler,
 		)
 	}
+}
+
+// RetireXHTTPClients keeps active XHTTP streams alive while preventing new
+// streams from reusing their cached HTTP transports. It returns the number of
+// retired clients.
+func (x *CoreController) RetireXHTTPClients() int32 {
+	x.coreMutex.Lock()
+	defer x.coreMutex.Unlock()
+
+	if !x.IsRunning || x.coreInstance == nil {
+		return 0
+	}
+	return int32(coresplithttp.RetireHTTPClients())
 }
 
 // CheckVersionX returns the library and Xray versions
