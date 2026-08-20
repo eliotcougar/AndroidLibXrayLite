@@ -64,7 +64,14 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
 func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error) {
-	config, err := coreserial.LoadJSONConfig(strings.NewReader(ConfigureFileContent))
+	return measureOutboundDelay(context.Background(), ConfigureFileContent, url)
+}
+
+func measureOutboundDelay(parentCtx context.Context, configContent string, url string) (int64, error) {
+	if err := parentCtx.Err(); err != nil {
+		return -1, err
+	}
+	config, err := coreserial.LoadJSONConfig(strings.NewReader(configContent))
 	if err != nil {
 		return -1, fmt.Errorf("config load error: %w", err)
 	}
@@ -80,7 +87,14 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 	}
 	config.App = essentialApp
 
-	inst, err := core.New(config)
+	if err := acquireProbeCore(parentCtx); err != nil {
+		return -1, err
+	}
+	defer releaseProbeCore()
+
+	ctx, cancel := context.WithTimeout(parentCtx, defaultRealDelayTimeout)
+	defer cancel()
+	inst, err := core.NewWithContext(ctx, config)
 	if err != nil {
 		return -1, fmt.Errorf("instance creation failed: %w", err)
 	}
@@ -89,11 +103,21 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelay(context.Background(), inst, url)
+	return measureInstDelayWithOptions(ctx, inst, url, http.MethodHead, 1, defaultRealDelayTimeout)
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
 func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int64, error) {
+	return measureInstDelayWithOptions(ctx, inst, url, http.MethodGet, 2, 12*time.Second)
+}
+
+func measureInstDelayWithOptions(
+	ctx context.Context,
+	inst *core.Instance,
+	url, method string,
+	attempts int,
+	timeout time.Duration,
+) (int64, error) {
 	if inst == nil {
 		return -1, errors.New("core instance is nil")
 	}
@@ -116,7 +140,7 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 	client := &http.Client{
 		Transport: tr,
-		Timeout:   12 * time.Second,
+		Timeout:   timeout,
 	}
 
 	var minDuration int64 = -1
@@ -125,7 +149,6 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 
 	defer tr.CloseIdleConnections()
 
-	const attempts = 2
 	for i := 0; i < attempts; i++ {
 		select {
 		case <-ctx.Done():
@@ -136,7 +159,7 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 		default:
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, method, url, nil)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to create HTTP request: %w", err)
 			continue
@@ -149,7 +172,9 @@ func measureInstDelay(ctx context.Context, inst *core.Instance, url string) (int
 			continue
 		}
 
-		_, err = io.Copy(io.Discard, resp.Body)
+		if method == http.MethodGet {
+			_, err = io.Copy(io.Discard, resp.Body)
+		}
 		resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
