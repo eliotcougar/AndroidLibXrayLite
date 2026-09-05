@@ -199,9 +199,7 @@ func (x *CoreController) getURL(url string, outboundTag string, headersJSON stri
 		if err := json.Unmarshal([]byte(headersJSON), &headers); err != nil {
 			return nil, fmt.Errorf("failed to parse request headers: %w", err)
 		}
-		for key, value := range headers {
-			req.Header.Set(key, value)
-		}
+		applyRequestHeaders(req, headers)
 	}
 
 	resp, err := (&http.Client{Transport: tr, Timeout: timeout}).Do(req)
@@ -217,6 +215,16 @@ func (x *CoreController) getURL(url string, outboundTag string, headersJSON stri
 	}
 
 	return resp, nil
+}
+
+func applyRequestHeaders(req *http.Request, headers map[string]string) {
+	for key, value := range headers {
+		if strings.EqualFold(key, "Host") {
+			req.Host = value
+			continue
+		}
+		req.Header.Set(key, value)
+	}
 }
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
