@@ -277,19 +277,6 @@ func (x *CoreController) resetNetworkStateWithConfigAndStarter(
 	return nil
 }
 
-// GetBalancerPrincipleTarget returns the strategy's current first-choice
-// outbound. An empty result means the observatory has not produced a viable
-// target yet or the running profile has no compatible balancer.
-func (x *CoreController) GetBalancerPrincipleTarget(balancerTag string) (string, error) {
-	x.coreMutex.Lock()
-	defer x.coreMutex.Unlock()
-
-	if !x.IsRunning || x.coreInstance == nil {
-		return "", nil
-	}
-	return firstBalancerPrincipleTarget(x.coreInstance, balancerTag)
-}
-
 func routedBalancerPlanForConfig(config *core.Config) (routedBalancerPlan, error) {
 	hasObservatory := false
 	for _, app := range config.App {
@@ -352,29 +339,6 @@ func balancerFeatures(inst *core.Instance) (corerouting.BalancerPrincipleTarget,
 		return nil, nil, errors.New("router does not support balancer overrides")
 	}
 	return principle, overrider, nil
-}
-
-func firstBalancerPrincipleTarget(inst *core.Instance, balancerTag string) (string, error) {
-	if balancerTag == "" {
-		return "", nil
-	}
-	if inst == nil {
-		return "", errors.New("core instance is nil")
-	}
-	principle, ok := inst.GetFeature(corerouting.RouterType()).(corerouting.BalancerPrincipleTarget)
-	if !ok {
-		return "", errors.New("router does not expose balancer principle targets")
-	}
-	targets, err := principle.GetPrincipleTarget(balancerTag)
-	if err != nil {
-		return "", err
-	}
-	for _, target := range targets {
-		if target != "" {
-			return target, nil
-		}
-	}
-	return "", nil
 }
 
 func setBalancerOverride(inst *core.Instance, balancerTag, target string) error {
