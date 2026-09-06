@@ -692,6 +692,18 @@ func reportWarmRouteReadinessDeadline(
 	}
 }
 
+// GetRunningConfig returns the configuration accepted by the running core,
+// including the original configuration after a successful reset rollback.
+// Android uses this daemon-local snapshot to renew its protected tethering lease.
+func (x *CoreController) GetRunningConfig() string {
+	x.coreMutex.Lock()
+	defer x.coreMutex.Unlock()
+	if !x.IsRunning {
+		return ""
+	}
+	return x.configContent
+}
+
 // RetireXHTTPClients keeps active XHTTP streams alive while preventing new
 // streams from reusing their cached HTTP transports. It returns the number of
 // retired clients.
