@@ -54,15 +54,21 @@ type routedBalancerPlan struct {
 
 // CoreController represents a controller for managing Xray core instance lifecycle
 type CoreController struct {
-	CallbackHandler    CoreCallbackHandler
-	statsManager       corestats.Manager
-	coreMutex          sync.Mutex
-	coreInstance       *core.Instance
-	configContent      string
-	stopTargetWatch    func()
-	stopWarmRouteWatch func()
-	warmRouteTimer     *time.Timer
-	IsRunning          bool
+	CallbackHandler          CoreCallbackHandler
+	statsManager             corestats.Manager
+	coreMutex                sync.Mutex
+	coreInstance             *core.Instance
+	configContent            string
+	stopTargetWatch          func()
+	stopWarmRouteWatch       func()
+	warmRouteTimer           *time.Timer
+	networkKey               string
+	networkHandle            int64
+	networkObservations      map[string]*networkObservationState
+	networkObservationOrder  []string
+	pendingObservation       *networkObservationState
+	restoredObservationCount int32
+	IsRunning                bool
 }
 
 // CoreCallbackHandler defines interface for receiving callbacks and notifications from the core service
@@ -145,6 +151,7 @@ func (x *CoreController) StartLoop(configContent string, tunFd int32) (err error
 		log.Println("Core is already running")
 		return nil
 	}
+	x.clearObservationStates()
 
 	if err := x.doStartLoop(configContent, "", ""); err != nil {
 		return err
@@ -158,6 +165,7 @@ func (x *CoreController) StartLoop(configContent string, tunFd int32) (err error
 func (x *CoreController) StopLoop() error {
 	x.coreMutex.Lock()
 	defer x.coreMutex.Unlock()
+	x.clearObservationStates()
 
 	if x.IsRunning {
 		x.doShutdown()
@@ -235,6 +243,13 @@ func (x *CoreController) resetNetworkStateWithConfigAndStarter(
 ) error {
 	x.coreMutex.Lock()
 	defer x.coreMutex.Unlock()
+	return x.resetNetworkStateWithConfigAndStarterLocked(replacementConfig, balancerTag, target, startLoop)
+}
+
+func (x *CoreController) resetNetworkStateWithConfigAndStarterLocked(
+	replacementConfig, balancerTag, target string,
+	startLoop func(string, string, string) error,
+) error {
 
 	if !x.IsRunning {
 		return nil
@@ -768,6 +783,11 @@ func (x *CoreController) doStartLoop(configContent, warmBalancerTag, warmTarget 
 	instance, err := core.New(config)
 	if err != nil {
 		return fmt.Errorf("core init failed: %w", err)
+	}
+	x.restoredObservationCount, err = restoreObservationState(instance, config, x.pendingObservation)
+	if err != nil {
+		_ = instance.Close()
+		return fmt.Errorf("observation state restoration failed: %w", err)
 	}
 	stopTargetWatch, err := watchBalancerTargetChanges(instance, plan.tag, x.CallbackHandler)
 	if err != nil {
