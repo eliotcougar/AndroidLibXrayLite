@@ -11,9 +11,13 @@ import (
 	"strings"
 	"time"
 
+	coreobservatory "github.com/xtls/xray-core/app/observatory"
+	corerouter "github.com/xtls/xray-core/app/router"
 	corenet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	core "github.com/xtls/xray-core/core"
+	coreextension "github.com/xtls/xray-core/features/extension"
+	coreoutbound "github.com/xtls/xray-core/features/outbound"
 	corestats "github.com/xtls/xray-core/features/stats"
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 )
@@ -70,11 +74,26 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 	}
 
 	config.Inbound = nil
+	var selectors []string
+	for _, app := range config.App {
+		if app.Type == "xray.app.router.Config" {
+			instance, err := app.GetInstance()
+			if err != nil {
+				return -1, err
+			}
+			for _, balancer := range instance.(*corerouter.Config).GetBalancingRule() {
+				selectors = append(selectors, balancer.GetOutboundSelector()...)
+			}
+		}
+	}
 	var essentialApp []*serial.TypedMessage
 	for _, app := range config.App {
 		if app.Type == "xray.app.proxyman.OutboundConfig" ||
 			app.Type == "xray.app.dispatcher.Config" ||
-			app.Type == "xray.app.log.Config" {
+			app.Type == "xray.app.log.Config" ||
+			(len(selectors) > 0 && (app.Type == "xray.app.router.Config" ||
+				app.Type == "xray.core.app.observatory.Config" ||
+				app.Type == "xray.core.app.observatory.burst.Config")) {
 			essentialApp = append(essentialApp, app)
 		}
 	}
@@ -86,10 +105,62 @@ func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error
 	}
 
 	if err := inst.Start(); err != nil {
+		inst.Close()
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
+	if len(selectors) > 0 && inst.GetFeature(coreextension.ObservatoryType()) != nil {
+		if err := waitForDelayTestObservations(inst, config, selectors); err != nil {
+			return -1, err
+		}
+	}
 	return measureInstDelay(context.Background(), inst, url)
+}
+
+// A disposable test has no warm observations. Wait for the first probe round so
+// its balancer does not prematurely use a dead fallback or an untested member.
+func waitForDelayTestObservations(inst *core.Instance, config *core.Config, selectors []string) error {
+	deadline, err := observationResultDeadline(config)
+	if err != nil {
+		return err
+	}
+	observer := inst.GetFeature(coreextension.ObservatoryType()).(coreextension.Observatory)
+	manager := inst.GetFeature(coreoutbound.ManagerType()).(coreoutbound.HandlerSelector)
+	candidates := manager.Select(selectors)
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		report, err := observer.GetObservation(ctx)
+		if err != nil {
+			return err
+		}
+		result, ok := report.(*coreobservatory.ObservationResult)
+		if !ok {
+			return errors.New("unexpected delay-test observation report")
+		}
+		observed := make(map[string]bool, len(result.Status))
+		for _, status := range result.Status {
+			observed[status.OutboundTag] = true
+		}
+		complete := true
+		for _, candidate := range candidates {
+			if !observed[candidate] {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			// Still measure through the configured fallback if probing timed out.
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
