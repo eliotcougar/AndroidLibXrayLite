@@ -7,10 +7,12 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/xtls/xray-core/common/serial"
 	core "github.com/xtls/xray-core/core"
 	coreextension "github.com/xtls/xray-core/features/extension"
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const maxNetworkObservationStates = 16
@@ -23,10 +25,53 @@ type networkObservationState struct {
 	states    map[string][]byte
 }
 
+func observationConfigBytes(message proto.Message) ([]byte, error) {
+	message = proto.Clone(message)
+	if err := normalizeObservationConfig(message.ProtoReflect()); err != nil {
+		return nil, err
+	}
+	return (proto.MarshalOptions{Deterministic: true}).Marshal(message)
+}
+
+// TypedMessage payloads contain their own serialized maps. Normalize them too,
+// so regenerating an unchanged configuration cannot invalidate its history.
+func normalizeObservationConfig(message protoreflect.Message) error {
+	if typed, ok := message.Interface().(*serial.TypedMessage); ok {
+		instance, err := typed.GetInstance()
+		if err != nil {
+			return err
+		}
+		typed.Value, err = observationConfigBytes(instance)
+		return err
+	}
+	var result error
+	message.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, value protoreflect.Value) bool {
+					result = normalizeObservationConfig(value.Message())
+					return result == nil
+				})
+			}
+		case field.Kind() != protoreflect.MessageKind:
+		case field.IsList():
+			list := value.List()
+			for index := 0; index < list.Len() && result == nil; index++ {
+				result = normalizeObservationConfig(list.Get(index).Message())
+			}
+		default:
+			result = normalizeObservationConfig(value.Message())
+		}
+		return result == nil
+	})
+	return result
+}
+
 func observationConfigIdentity(config *core.Config) (map[string][32]byte, map[string][32]byte, error) {
 	outbounds := make(map[string][32]byte)
 	for _, outbound := range config.Outbound {
-		data, err := proto.Marshal(outbound)
+		data, err := observationConfigBytes(outbound)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -34,12 +79,20 @@ func observationConfigIdentity(config *core.Config) (map[string][32]byte, map[st
 	}
 	settings := make(map[string][32]byte)
 	for _, app := range config.App {
+		var kind string
 		switch app.Type {
 		case "xray.core.app.observatory.Config":
-			settings["*observatory.Observer"] = sha256.Sum256(app.Value)
+			kind = "*observatory.Observer"
 		case "xray.core.app.observatory.burst.Config":
-			settings["*burst.Observer"] = sha256.Sum256(app.Value)
+			kind = "*burst.Observer"
+		default:
+			continue
 		}
+		data, err := observationConfigBytes(app)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings[kind] = sha256.Sum256(data)
 	}
 	return outbounds, settings, nil
 }

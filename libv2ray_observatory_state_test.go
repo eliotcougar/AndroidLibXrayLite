@@ -203,3 +203,24 @@ func TestNetworkStateCacheIsBounded(t *testing.T) {
 		t.Fatal("network history survived stop")
 	}
 }
+
+func TestObservationIdentityIgnoresProtobufMapOrdering(t *testing.T) {
+	content := strings.Replace(observationTestConfig("http://127.0.0.1/probe"),
+		`{"tag":"group-B-2","protocol":"freedom"}`,
+		`{"tag":"group-B-2","protocol":"freedom","streamSettings":{"network":"ws","wsSettings":{"headers":{"X-A":"a","X-B":"b","X-C":"c","X-D":"d"}}}}`, 1)
+	var previous map[string][32]byte
+	for index := 0; index < 64; index++ {
+		config, err := coreserial.LoadJSONConfig(strings.NewReader(content))
+		if err != nil {
+			t.Fatal(err)
+		}
+		outbounds, _, err := observationConfigIdentity(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous != nil && previous["group-B-2"] != outbounds["group-B-2"] {
+			t.Fatal("identical outbound settings received different identities")
+		}
+		previous = outbounds
+	}
+}
