@@ -64,15 +64,22 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 
 // MeasureOutboundDelay measures the outbound delay for a given configuration and URL
 func MeasureOutboundDelay(ConfigureFileContent string, url string) (int64, error) {
-	return measureOutboundDelay(context.Background(), ConfigureFileContent, url)
+	return measureOutboundDelay(context.Background(), ConfigureFileContent, url, http.MethodGet, 2, 12*time.Second)
 }
 
 // MeasureDelay runs one individually configured fallback through this controller.
 func (c *ProbeController) MeasureDelay(configContent string, url string) (int64, error) {
-	return measureOutboundDelay(c.ctx, configContent, url)
+	ctx, cancel := context.WithTimeout(c.ctx, defaultRealDelayTimeout)
+	defer cancel()
+	return measureOutboundDelay(ctx, configContent, url, http.MethodHead, 1, defaultRealDelayTimeout)
 }
 
-func measureOutboundDelay(parentCtx context.Context, configContent string, url string) (int64, error) {
+func measureOutboundDelay(
+	parentCtx context.Context,
+	configContent, url, method string,
+	attempts int,
+	timeout time.Duration,
+) (int64, error) {
 	if err := parentCtx.Err(); err != nil {
 		return -1, err
 	}
@@ -98,9 +105,7 @@ func measureOutboundDelay(parentCtx context.Context, configContent string, url s
 	}
 	defer releaseProbeCore()
 
-	ctx, cancel := context.WithTimeout(parentCtx, defaultRealDelayTimeout)
-	defer cancel()
-	inst, err := core.NewWithContext(ctx, config)
+	inst, err := core.NewWithContext(parentCtx, config)
 	if err != nil {
 		return -1, fmt.Errorf("instance creation failed: %w", err)
 	}
@@ -109,7 +114,7 @@ func measureOutboundDelay(parentCtx context.Context, configContent string, url s
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
-	return measureInstDelayWithOptions(ctx, inst, url, http.MethodHead, 1, defaultRealDelayTimeout)
+	return measureInstDelayWithOptions(parentCtx, inst, url, method, attempts, timeout)
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
