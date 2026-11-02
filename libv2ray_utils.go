@@ -14,11 +14,14 @@ import (
 	"strings"
 	"time"
 
+	coreobservatory "github.com/xtls/xray-core/app/observatory"
+	corerouter "github.com/xtls/xray-core/app/router"
 	corenet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/serial"
 	coresession "github.com/xtls/xray-core/common/session"
 	core "github.com/xtls/xray-core/core"
-	corerouting "github.com/xtls/xray-core/features/routing"
+	coreextension "github.com/xtls/xray-core/features/extension"
+	coreoutbound "github.com/xtls/xray-core/features/outbound"
 	corestats "github.com/xtls/xray-core/features/stats"
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 )
@@ -65,42 +68,6 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 	defer cancel()
 
 	return measureInstDelay(ctx, x.coreInstance, url)
-}
-
-// GetBalancerPrincipleTarget returns the strategy's current first-choice
-// outbound. An empty result means the observatory has not produced a viable
-// target yet or the running profile has no compatible balancer.
-func (x *CoreController) GetBalancerPrincipleTarget(balancerTag string) (string, error) {
-	x.coreMutex.Lock()
-	defer x.coreMutex.Unlock()
-
-	if !x.IsRunning || x.coreInstance == nil {
-		return "", nil
-	}
-	return firstBalancerPrincipleTarget(x.coreInstance, balancerTag)
-}
-
-func firstBalancerPrincipleTarget(inst *core.Instance, balancerTag string) (string, error) {
-	if balancerTag == "" {
-		return "", nil
-	}
-	if inst == nil {
-		return "", errors.New("core instance is nil")
-	}
-	principle, ok := inst.GetFeature(corerouting.RouterType()).(corerouting.BalancerPrincipleTarget)
-	if !ok {
-		return "", errors.New("router does not expose balancer principle targets")
-	}
-	targets, err := principle.GetPrincipleTarget(balancerTag)
-	if err != nil {
-		return "", err
-	}
-	for _, target := range targets {
-		if target != "" {
-			return target, nil
-		}
-	}
-	return "", nil
 }
 
 // GetUrlContent retrieves a URL through the requested outbound of the current core instance.
@@ -268,11 +235,26 @@ func measureOutboundDelay(
 
 	// Simplify config for testing
 	config.Inbound = nil
+	var selectors []string
+	for _, app := range config.App {
+		if app.Type == "xray.app.router.Config" {
+			instance, err := app.GetInstance()
+			if err != nil {
+				return -1, err
+			}
+			for _, balancer := range instance.(*corerouter.Config).GetBalancingRule() {
+				selectors = append(selectors, balancer.GetOutboundSelector()...)
+			}
+		}
+	}
 	var essentialApp []*serial.TypedMessage
 	for _, app := range config.App {
 		if app.Type == "xray.app.proxyman.OutboundConfig" ||
 			app.Type == "xray.app.dispatcher.Config" ||
-			app.Type == "xray.app.log.Config" {
+			app.Type == "xray.app.log.Config" ||
+			(len(selectors) > 0 && (app.Type == "xray.app.router.Config" ||
+				app.Type == "xray.core.app.observatory.Config" ||
+				app.Type == "xray.core.app.observatory.burst.Config")) {
 			essentialApp = append(essentialApp, app)
 		}
 	}
@@ -289,10 +271,65 @@ func measureOutboundDelay(
 	}
 
 	if err := inst.Start(); err != nil {
+		inst.Close()
 		return -1, fmt.Errorf("startup failed: %w", err)
 	}
 	defer inst.Close()
+	if len(selectors) > 0 && inst.GetFeature(coreextension.ObservatoryType()) != nil {
+		if err := waitForDelayTestObservations(parentCtx, inst, config, selectors); err != nil {
+			return -1, err
+		}
+	}
 	return measureInstDelayWithOptions(parentCtx, inst, url, method, attempts, timeout)
+}
+
+// A disposable test has no warm observations. Wait for the first probe round so
+// its balancer does not prematurely use a dead fallback or an untested member.
+func waitForDelayTestObservations(parentCtx context.Context, inst *core.Instance, config *core.Config, selectors []string) error {
+	deadline, err := observationResultDeadline(config)
+	if err != nil {
+		return err
+	}
+	observer := inst.GetFeature(coreextension.ObservatoryType()).(coreextension.Observatory)
+	manager := inst.GetFeature(coreoutbound.ManagerType()).(coreoutbound.HandlerSelector)
+	candidates := manager.Select(selectors)
+	ctx, cancel := context.WithTimeout(parentCtx, deadline)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		report, err := observer.GetObservation(ctx)
+		if err != nil {
+			return err
+		}
+		result, ok := report.(*coreobservatory.ObservationResult)
+		if !ok {
+			return errors.New("unexpected delay-test observation report")
+		}
+		observed := make(map[string]bool, len(result.Status))
+		for _, status := range result.Status {
+			observed[status.OutboundTag] = true
+		}
+		complete := true
+		for _, candidate := range candidates {
+			if !observed[candidate] {
+				complete = false
+				break
+			}
+		}
+		if complete {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			if parentCtx.Err() != nil {
+				return parentCtx.Err()
+			}
+			// Still measure through the configured fallback if probing timed out.
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 // measureInstDelay measures the delay for an instance to a given URL
