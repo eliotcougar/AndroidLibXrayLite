@@ -227,6 +227,19 @@ func (x *CoreController) StopLoop() error {
 	return nil
 }
 
+// GetRunningConfig returns the exact configuration owned by the running core.
+// Reset callers see the committed replacement or rollback, never a candidate.
+// A stopped controller has no running configuration.
+func (x *CoreController) GetRunningConfig() string {
+	x.coreMutex.Lock()
+	defer x.coreMutex.Unlock()
+
+	if !x.IsRunning || x.coreInstance == nil {
+		return ""
+	}
+	return x.configContent
+}
+
 // RetireXHTTPClients keeps active XHTTP streams alive while preventing new
 // streams from reusing their cached HTTP transports. It returns the number of
 // retired clients.
