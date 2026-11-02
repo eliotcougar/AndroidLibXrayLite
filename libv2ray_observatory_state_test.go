@@ -3,6 +3,7 @@ package libv2ray
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +25,41 @@ func (observationTestCallback) Startup() int                               { ret
 func (observationTestCallback) Shutdown() int                              { return 0 }
 func (observationTestCallback) OnEmitStatus(int, string) int               { return 0 }
 func (observationTestCallback) OnBalancerTargetChanged(string, string) int { return 0 }
+
+func TestFailedStartReleasesInstanceBeforeRetry(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	config := fmt.Sprintf(`{"log":{"loglevel":"none"},"stats":{},
+		"inbounds":[{"listen":"127.0.0.1","port":%d,"protocol":"socks","settings":{"auth":"noauth"}}],
+		"outbounds":[{"protocol":"freedom"}]}`, listener.Addr().(*net.TCPAddr).Port)
+	controller := NewCoreController(observationTestCallback{})
+	t.Cleanup(func() { _ = controller.StopLoop() })
+
+	if err := controller.StartLoop(config, 0); err == nil || !strings.Contains(err.Error(), "startup failed") {
+		t.Fatalf("expected an occupied-port startup failure, got %v", err)
+	}
+	if controller.IsRunning || controller.coreInstance != nil || controller.statsManager != nil || controller.stopTargetWatch != nil {
+		t.Fatal("failed startup retained running state or owned resources")
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.StartLoop(config, 0); err != nil {
+		t.Fatalf("retry after releasing the port failed: %v", err)
+	}
+	if !controller.IsRunning {
+		t.Fatal("successful retry did not publish running state")
+	}
+	if err := controller.StopLoop(); err != nil {
+		t.Fatal(err)
+	}
+	if controller.IsRunning || controller.coreInstance != nil {
+		t.Fatal("stop after retry retained running state")
+	}
+}
 
 func observationTestConfig(url string) string {
 	return fmt.Sprintf(`{

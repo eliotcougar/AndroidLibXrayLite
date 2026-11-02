@@ -823,19 +823,18 @@ func (x *CoreController) doStartLoop(configContent, warmBalancerTag, warmTarget 
 	}
 
 	log.Println("starting core...")
+	x.coreInstance = instance
+	x.stopTargetWatch = stopTargetWatch
+	x.statsManager = instance.GetFeature(corestats.ManagerType()).(corestats.Manager)
+	x.IsRunning = true
 	if err := instance.Start(); err != nil {
-		stopTargetWatch()
-		_ = instance.Close()
+		x.doShutdown()
 		return fmt.Errorf("startup failed: %w", err)
 	}
 	if warmRouteApplied {
 		probeWarmRouteFirst(instance, warmTarget)
 	}
 
-	x.coreInstance = instance
-	x.stopTargetWatch = stopTargetWatch
-	x.statsManager = instance.GetFeature(corestats.ManagerType()).(corestats.Manager)
-	x.IsRunning = true
 	if warmRouteApplied {
 		x.stopWarmRouteWatch = watchWarmRouteHealth(
 			instance,
