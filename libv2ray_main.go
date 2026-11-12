@@ -109,6 +109,7 @@ type CoreController struct {
 	statsManager             corestats.Manager
 	coreMutex                sync.Mutex
 	coreInstance             *core.Instance
+	balancerFallbacks        map[string]string
 	configContent            string
 	stopTargetWatch          func()
 	stopWarmRouteWatch       func()
@@ -1084,6 +1085,7 @@ func (x *CoreController) doShutdown() {
 	}
 	x.IsRunning = false
 	x.statsManager = nil
+	x.balancerFallbacks = nil
 }
 
 // doStartLoop sets up and starts the Xray core
@@ -1168,6 +1170,7 @@ func (x *CoreController) doStartLoop(configContent, warmBalancerTag, warmTarget 
 		})
 	}
 
+	x.balancerFallbacks = configuredBalancerFallbacks(config)
 	x.CallbackHandler.Startup()
 	x.CallbackHandler.OnEmitStatus(0, "Started successfully, running")
 

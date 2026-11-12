@@ -22,6 +22,7 @@ import (
 	core "github.com/xtls/xray-core/core"
 	coreextension "github.com/xtls/xray-core/features/extension"
 	coreoutbound "github.com/xtls/xray-core/features/outbound"
+	corerouting "github.com/xtls/xray-core/features/routing"
 	corestats "github.com/xtls/xray-core/features/stats"
 	coreserial "github.com/xtls/xray-core/infra/conf/serial"
 )
@@ -68,6 +69,60 @@ func (x *CoreController) MeasureDelay(url string) (int64, error) {
 	defer cancel()
 
 	return measureInstDelay(ctx, x.coreInstance, url)
+}
+
+// GetBalancerOutbound resolves an explicit app-request outbound, honoring an active
+// override and the configured group fallback when the strategy has no target.
+func (x *CoreController) GetBalancerOutbound(balancerTag string) (string, error) {
+	x.coreMutex.Lock()
+	defer x.coreMutex.Unlock()
+
+	inst := x.coreInstance
+	if !x.IsRunning || inst == nil {
+		return "", errors.New("core is not running")
+	}
+	if router, ok := inst.GetFeature(corerouting.RouterType()).(corerouting.BalancerOverrider); ok {
+		target, err := router.GetOverrideTarget(balancerTag)
+		if err == nil && target != "" {
+			return target, nil
+		}
+	}
+	target, err := firstBalancerPrincipleTarget(inst, balancerTag)
+	if err == nil && target != "" {
+		return target, nil
+	}
+	fallback := x.balancerFallbacks[balancerTag]
+	if fallback != "" {
+		manager, ok := inst.GetFeature(coreoutbound.ManagerType()).(coreoutbound.Manager)
+		if ok && manager.GetHandler(fallback) != nil {
+			return fallback, nil
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("balancer %q has no usable outbound", balancerTag)
+}
+
+func configuredBalancerFallbacks(config *core.Config) map[string]string {
+	fallbacks := make(map[string]string)
+	for _, app := range config.App {
+		if app.Type != "xray.app.router.Config" {
+			continue
+		}
+		// LoadJSONConfig has already decoded and validated the router configuration.
+		instance, err := app.GetInstance()
+		router, ok := instance.(*corerouter.Config)
+		if err != nil || !ok {
+			continue
+		}
+		for _, balancer := range router.GetBalancingRule() {
+			if fallback := balancer.GetFallbackTag(); fallback != "" {
+				fallbacks[balancer.GetTag()] = fallback
+			}
+		}
+	}
+	return fallbacks
 }
 
 // GetUrlContent retrieves a URL through the requested outbound of the current core instance.
